@@ -1,0 +1,416 @@
+#!/usr/bin/env ruby
+# 1.9 adds realpath to resolve symlinks; 1.8 doesn't
+# have this method, so we add it so we get resolved symlinks
+# and compatibility
+unless File.respond_to? :realpath
+  class File #:nodoc:
+    def self.realpath path
+      return realpath(File.readlink(path)) if symlink?(path)
+      path
+    end
+  end
+end
+$: << File.expand_path(File.dirname(File.realpath(__FILE__)) + '/../lib')
+require 'rubygems'
+require 'gli'
+require 'jefe_version'
+require 'rest-client'
+require 'json'
+
+module Proxy
+
+  def self.to_arpa(ip)
+    ip.split(/\./).reverse.join(".") + ".in-addr.arpa"
+  end
+
+end
+
+module Proxy::DNS
+  class Record
+
+    def initialize options = {}
+      @server = options[:proxy] || "http://localhost:8443"
+      @fqdn   = options[:fqdn]
+      @ttl    = options[:ttl]
+      @type   = options[:type]
+      @value  = options[:value]
+      @headers = { 
+        'Content-Type' => 'application/json',
+        'Accept'       => 'application/json',
+      }
+
+
+      raise("Must define FQDN or Value") if @fqdn.nil? and @value.nil?
+    end
+
+    def add
+      @record = {
+        :fqdn  => @fqdn,
+        :value => @value,
+        :type  => @type,
+      }
+      response = RestClient.post(@server + '/dns/', @record, @headers)
+    end
+
+    def delete
+      response = RestClient.delete(@server + '/dns/' + @fqdn, @headers)
+    end
+
+    # Clear out a hosts A and PTR records and do them authoritatively
+    def ensure_host
+    end
+
+  end
+
+end
+
+module Proxy::DHCP
+  class Reservation
+
+    def initialize options = {}
+      @server  = options[:proxy] || "http://localhost:8443"
+      @network = options[:network]
+      @from    = options[:from]
+      @to      = options[:to]
+      @nextserver = "10.61.8.10"
+    end
+
+    def create options = {}
+      @hostname = options[:hostname]
+      @mac      = options[:mac]
+      @ip       = options[:ip]
+
+      target_url = @server + '/dhcp/' + @network
+
+      reservation = {
+        :hostname   => @hostname,
+        :filename   => "pxelinux.0",
+        :ip         => @ip,
+        :nextServer => "10.61.8.10",
+        :mac        => @mac,
+      }
+      
+      puts reservation
+      response = RestClient.post(target_url, reservation, @headers)
+      if response.code == 200
+        "OK, Added"
+      end
+    end
+
+    def delete options = {}
+      ip = options[:ip]
+
+      target_url = "#{@server}/dhcp/#{@network}/#{ip}"
+      begin
+        response = RestClient.delete(target_url, @headers)
+      rescue => e
+        response = e.response
+        if response.code == 302
+          "OK, deleted"
+        else
+          raise
+        end
+      end
+    end
+
+    def unused_ip
+      target_url = @server + '/dhcp/' + @network + '/unused_ip'
+      response = RestClient.get(target_url, :params => {:from => @from, :to => @to})
+    end
+
+  end
+end
+
+include GLI
+
+program_desc 'Manage DHCP and DNS via the Foreman-Proxy API'
+
+version Jefe::VERSION
+
+desc 'Verbosity'
+switch [:v,:verbose]
+
+desc 'Proxy server url'
+default_value 'http://localhost:8443'
+arg_name 'proxy-url'
+flag [:s,:server]
+
+desc 'Add A record to DNS'
+arg_name 'fqdn ip'
+command :add_a do |c|
+  c.desc 'Force addition'
+  c.switch :f
+
+  c.desc 'TTL'
+  c.default_value '86400'
+  c.flag [:t,:ttl]
+  c.action do |global_options,options,args|
+
+    raise ArgumentError, "Must supply two arguments" unless args.size == 2
+
+    fqdn = args[0]
+    value = args[1]
+
+    proxy = Proxy::DNS::Record.new({
+      :proxy => global_options[:server],
+      :ttl   => options[:ttl],
+      :fqdn  => fqdn,
+      :value => value,
+      :type  => "A",
+    })
+
+    begin
+      proxy.add
+    rescue
+      raise $!.inspect
+    end
+
+  end
+
+end
+
+
+desc 'Add PTR record to DNS'
+arg_name 'fqdn ip'
+command :add_ptr do |c|
+
+  c.desc 'TTL'
+  c.default_value '86400'
+  c.flag [:t,:ttl]
+  c.action do |global_options,options,args|
+
+    raise ArgumentError, "Must supply two arguments" unless args.size == 2
+
+    fqdn = args[0]
+    value = Proxy.to_arpa(args[1])
+
+    proxy = Proxy::DNS::Record.new({
+      :proxy => global_options[:server],
+      :ttl   => options[:ttl],
+      :fqdn  => fqdn,
+      :value => value,
+      :type  => "PTR",
+    })
+
+    begin
+      proxy.add
+    rescue
+      raise $!.inspect
+    end
+
+  end
+end
+
+
+desc 'Add host (matching A and PTR records)'
+arg_name 'fqdn_ip'
+command :add_host do |c|
+  c.desc 'Delete old records'
+  c.switch :f
+
+  c.action do |global_options,options,args|
+
+  end
+end
+
+
+desc 'Add CNAME record to DNS'
+arg_name 'Adds CNAME record to DNS'
+command :add_cname do |c|
+  c.desc 'Force addition'
+  c.switch :f
+
+  c.desc 'TTL'
+  c.default_value '86400'
+  c.flag [:t,:ttl]
+  c.action do |global_options,options,args|
+
+    # Your command logic here
+     
+    # If you have any errors, just raise them
+    # raise "that command made no sense"
+  end
+end
+
+desc 'Delete A record from DNS'
+arg_name 'fqdn'
+command :delete_a do |c|
+  c.action do |global_options,options,args|
+
+    raise ArgumentError, "Must supply fqdn" unless args.size == 1
+
+    fqdn = args[0]
+
+    puts "Deleting #{fqdn}"
+
+    proxy = Proxy::DNS::Record.new({
+      :proxy => global_options[:server],
+      :fqdn  => fqdn,
+      :type  => "A",
+    })
+
+    begin
+      proxy.delete
+    rescue
+      raise $!.inspect
+    end
+
+  end
+end
+
+desc 'Delete PTR record from DNS'
+arg_name 'ip'
+command :delete_ptr do |c|
+  c.action do |global_options,options,args|
+
+    raise ArgumentError, "Must supply ip" unless args.size == 1
+
+    ip = Proxy.to_arpa(args[0])
+
+    puts "Deleting #{ip}"
+
+    proxy = Proxy::DNS::Record.new({
+      :proxy => global_options[:server],
+      :fqdn  => ip,
+      :type  => "PTR",
+    })
+
+    begin
+      proxy.delete
+    rescue
+      raise $!.inspect
+    end
+
+  end
+end
+
+desc 'Get unused IP from network'
+arg_name 'network'
+command :get_unused do |c|
+
+  c.desc 'From IP'
+  c.flag [:from]
+
+  c.desc 'To IP'
+  c.flag [:to]
+
+  c.action do |global_options,options,args|
+
+    raise ArgumentError, "Must supply network" unless args.size == 1
+
+    network = args[0]
+    from = options[:from] || network.split(/\./)[0..2].join(".") + ".20"
+    to = options[:to] || network.split(/\./)[0..2].join(".") + ".240"
+
+    #ip.split(/\./).reverse.join(".") + ".in-addr.arpa"
+
+    proxy = Proxy::DHCP::Reservation.new({
+      :proxy   => global_options[:server],
+      :network => network,
+      :from    => from,
+      :to      => to,
+    })
+
+    begin
+      result = JSON.parse(proxy.unused_ip)
+      puts result["ip"]
+    rescue
+      raise $!.inspect
+    end
+
+  end
+end
+
+desc 'Create DHCP reservation'
+arg_name 'hostname'
+command :dhcp_add do |c|
+
+  c.desc 'mac'
+  c.flag [:m, :mac]
+
+  c.desc 'ip address'
+  c.flag [:i, :ip]
+
+  c.action do |global_options,options,args|
+
+    raise ArgumentError, "Must supply mac and ip" unless options[:mac] or options[:ip]
+    raise ArgumentError, "Need hostname" unless args.size == 1
+
+    hostname = args[0]
+
+    mac = options[:mac]
+    ip  = options[:ip]
+
+    network = ip.split(/\./)[0..2].join(".") + ".0"
+
+    proxy = Proxy::DHCP::Reservation.new({
+      :proxy   => global_options[:server],
+      :network => network,
+    })
+
+    begin
+      result = proxy.create({
+        :hostname => hostname,
+        :mac      => mac,
+        :ip       => ip,
+      })
+      puts result
+    rescue
+      raise $!.inspect
+    end
+
+  end
+end
+
+desc 'Delete DHCP reservation'
+arg_name 'ip'
+command :delete_dhcp do |c|
+
+  c.action do |global_options,options,args|
+
+    raise ArgumentError, "Must supply an ip address" unless args.size == 1
+
+    ip = args[0]
+
+    network = ip.split(/\./)[0..2].join(".") + ".0"
+
+    proxy = Proxy::DHCP::Reservation.new({
+      :proxy   => global_options[:server],
+      :network => network,
+    })
+
+    begin
+      result = proxy.delete({
+        :ip => ip,
+      })
+      puts result
+    rescue
+      raise $!.inspect
+    end
+
+  end
+end
+
+
+pre do |global,command,options,args|
+  # Pre logic here
+  # Return true to proceed; false to abort and not call the
+  # chosen command
+  # Use skips_pre before a command to skip this block
+  # on that command only
+  true
+end
+
+post do |global,command,options,args|
+  # Post logic here
+  # Use skips_post before a command to skip this
+  # block on that command only
+end
+
+on_error do |exception|
+  # Error logic here
+  # return false to skip default error handling
+  true
+end
+
+exit GLI.run(ARGV)

@@ -1,0 +1,5 @@
+= jefe
+
+Generate this with
+    jefe rdoc
+After you have described your command line interface
